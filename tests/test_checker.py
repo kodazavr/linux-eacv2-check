@@ -36,9 +36,9 @@ class CheckerTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(value if isinstance(value, bytes) else value.encode())
 
-    def run_check(self, *args):
+    def run_check(self, *args, env=None):
         return subprocess.run(["bash", str(SCRIPT), "--root", str(self.root), *args],
-                              text=True, capture_output=True, timeout=15)
+                              text=True, capture_output=True, timeout=15, env=env)
 
     def status(self, result, check, expected):
         self.assertRegex(result.stdout, rf"(?m)^\[{expected}\] {check}:", result.stdout)
@@ -52,6 +52,35 @@ class CheckerTests(unittest.TestCase):
         for check in ("Signed kernel and modules", "Measured boot"):
             self.status(r, check, "UNKNOWN")
         self.assertIn("INDETERMINATE", r.stdout)
+
+    def test_forced_color_distinguishes_pass_fail_and_unknown(self):
+        self.put("proc/cmdline", "iommu=pt\n")
+        r = self.run_check("--color=always")
+        self.assertIn("\x1b[32m[PASS]\x1b[0m", r.stdout)
+        self.assertIn("\x1b[31m[FAIL]\x1b[0m", r.stdout)
+        self.assertIn("\x1b[33m[UNKNOWN]\x1b[0m", r.stdout)
+        self.assertIn("\x1b[33m[WARN]\x1b[0m", r.stdout)
+        self.assertIn("\x1b[31mRESULT: NOT READY:", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_automatic_color_stays_plain_when_captured(self):
+        env = os.environ.copy()
+        env.pop("NO_COLOR", None)
+        env["TERM"] = "xterm-256color"
+        self.assertNotIn("\x1b[", self.run_check(env=env).stdout)
+
+    def test_color_never_and_invalid_color_mode(self):
+        r = self.run_check("--color=never")
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("\x1b[", r.stdout)
+        self.assertEqual(self.run_check("--color=rainbow").returncode, 64)
+        self.assertEqual(self.run_check("--color").returncode, 64)
+
+    def test_explicit_color_setting_overrides_no_color_environment(self):
+        env = os.environ.copy()
+        env["NO_COLOR"] = "1"
+        self.assertIn("\x1b[", self.run_check("--color", "always", env=env).stdout)
+        self.assertNotIn("\x1b[", self.run_check(env=env).stdout)
 
     def test_disabled_runtime_features_fail_even_with_good_boot_arguments(self):
         self.put("sys/kernel/security/lockdown", "[none] integrity confidentiality\n")

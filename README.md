@@ -80,6 +80,16 @@ The name of an Arch derivative alone is not treated as an incompatibility.
 - `UNKNOWN`: evidence is unavailable or requires stronger validation.
 - `SKIP`: the user selected the handheld IOMMU exception.
 
+In a terminal, `PASS` is green, `FAIL` is red, `UNKNOWN` and diagnostic `WARN`
+messages are yellow, and `SKIP` is cyan. Summary counts and the final result use
+the same colors. Warnings provide context and do not add failed checks.
+Status labels remain visible without color.
+
+Color defaults to `--color=auto`: redirected/piped output and `TERM=dumb` stay
+plain, and a nonempty `NO_COLOR` environment variable disables automatic color.
+Use `--color=always` to force ANSI colors or `--color=never` to disable them.
+An explicit color setting takes precedence over `NO_COLOR`.
+
 Checks include evidence lines in the form `current=...; expected=...`, so a
 mismatch identifies the observed value and the condition being checked. Where
 several items contribute evidence, they are listed individually: both Secure

@@ -7,12 +7,14 @@ shopt -s nullglob
 
 ROOT='' BLOCKED=0 UNKNOWN=0 PASSED=0 SKIPPED=0 HANDHELD=0
 CONFIG='' CMDLINE='' KERNEL='' KERNEL_IMAGE='' LIST_KEYS=0 CMDLINE_READABLE=0
+COLOR_MODE=auto COLOR_ENABLED=0
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 declare -a BOOT_ARGS=()
 
 usage() {
     cat <<'EOF'
 Usage: eacv2-check.sh [--handheld] [--kernel IMAGE] [--root DIRECTORY]
+                    [--color auto|always|never]
        eacv2-check.sh --list-keys
 
 Read-only checks of the currently booted system against Epic's EAC Linux v2
@@ -23,6 +25,8 @@ requirements (researched 2026-11-06). No installation, network access or changes
                  This does not prove that IMAGE is the kernel currently running.
   --root DIR     Inspect an offline proc/sys/etc/boot snapshot, not the live OS.
   --list-keys    List bundled, inferred distribution certificates and sources.
+  --color MODE   auto (default), always, or never; --color=MODE also works.
+                 Auto honors NO_COLOR and TERM=dumb and colors terminals only.
   -h, --help     Show this help.
 
 Results: PASS = observed local prerequisite; FAIL = observed blocker;
@@ -30,6 +34,35 @@ UNKNOWN = insufficient evidence; SKIP = explicitly selected exception.
 Exit: 1 blockers found; 2 inconclusive; 0 help/key listing; 64 invalid invocation.
 This preflight cannot certify Epic acceptance or perform remote attestation.
 EOF
+}
+
+setup_color() {
+    case $COLOR_MODE in
+        always) COLOR_ENABLED=1;;
+        never) COLOR_ENABLED=0;;
+        auto)
+            if [[ -t 1 && ${TERM:-dumb} != dumb && -z ${NO_COLOR:-} ]]; then COLOR_ENABLED=1; fi;;
+    esac
+}
+
+color_text() {
+    local level=$1 text=$2 code=''
+    if (( COLOR_ENABLED )); then
+        case $level in
+            PASS) code=$'\e[32m';;
+            FAIL) code=$'\e[31m';;
+            WARN|UNKNOWN) code=$'\e[33m';;
+            SKIP) code=$'\e[36m';;
+        esac
+    fi
+    printf '%s%s' "$code" "$text"
+    [[ -z $code ]] || printf '\033[0m'
+    return 0
+}
+
+warning() {
+    color_text WARN '[WARN]'
+    printf ' %s\n' "$1"
 }
 
 report() {
@@ -40,7 +73,8 @@ report() {
         UNKNOWN) UNKNOWN=$((UNKNOWN + 1));;
         SKIP) SKIPPED=$((SKIPPED + 1));;
     esac
-    printf '[%s] %s: %s\n' "$status" "$title" "$detail"
+    color_text "$status" "[$status]"
+    printf ' %s: %s\n' "$title" "$detail"
 }
 
 evidence() {
@@ -157,10 +191,10 @@ check_signatures() {
         printf '[INFO] No loaded modules with E taint found; global taint persists after unloading and this does not establish Epic key trust.\n'
     fi
     if (( ! available )); then
-        printf '[INFO] Loaded module taint list unavailable in this filesystem view.\n'
+        warning 'Loaded module taint list unavailable in this filesystem view.'
         evidence /sys/module '<unavailable>' 'readable per-module taint files'
     elif (( unreadable )); then
-        printf '[INFO] %d module taint file(s) unreadable; loaded module list may be incomplete.\n' "$unreadable"
+        warning "$unreadable module taint file(s) unreadable; loaded module list may be incomplete."
         for path in "${unreadable_paths[@]}"; do evidence "$path" '<unreadable>' 'readable taint flags without E'; done
     fi
 }
@@ -175,7 +209,7 @@ key_hints() {
     local -a attempted=() results=()
     local registry="$SCRIPT_DIR/certs/keys.tsv" image=$KERNEL_IMAGE
     if [[ ! -r $registry ]]; then
-        printf '[INFO] Signing keys: bundled candidate key registry is unavailable.\n'
+        warning 'Signing keys: bundled candidate key registry is unavailable.'
         evidence "$registry" '<unreadable or missing>' 'readable preliminary certificate registry'
         return
     fi
@@ -214,7 +248,7 @@ key_hints() {
                 fi
             done < "$registry"
             if (( matched == 0 )); then
-                printf '[INFO] Kernel signature: no verification against bundled keys; list may be incomplete, image unsigned/unsupported, or verifier may have failed.\n'
+                warning 'Kernel signature: no verification against bundled keys; list may be incomplete, image unsigned/unsupported, or verifier may have failed.'
                 for index in "${!attempted[@]}"; do
                     evidence "${attempted[$index]}" "${results[$index]}" 'exit 0 for at least one candidate; reference is preliminary'
                 done
@@ -226,7 +260,7 @@ key_hints() {
                 fi
             fi
         else
-            printf '[INFO] Kernel signature: optional openssl and sbverify (sbsigntools) are needed for cryptographic candidate-key checks.\n'
+            warning 'Kernel signature: optional openssl and sbverify (sbsigntools) are needed for cryptographic candidate-key checks.'
             local tool location
             for tool in openssl sbverify; do
                 location=$(command -v "$tool") || location='<unavailable>'
@@ -234,7 +268,7 @@ key_hints() {
             done
         fi
     else
-        printf '[INFO] Kernel signature: no unambiguous on-disk candidate found; use --kernel IMAGE.\n'
+        warning 'Kernel signature: no unambiguous on-disk candidate found; use --kernel IMAGE.'
     fi
     # sig_key is a key identifier from disk metadata, not cryptographic proof
     # that a loaded module was signed or is identical to its current disk file.
@@ -524,6 +558,12 @@ main() {
             -h|--help) usage; return 0;;
             --list-keys) LIST_KEYS=1; shift;;
             --handheld) HANDHELD=1; shift;;
+            --color|--color=*)
+                if [[ $1 == --color ]]; then
+                    if (( $# < 2 )); then printf 'Missing value for --color\n' >&2; return 64; fi
+                    COLOR_MODE=$2; shift 2
+                else COLOR_MODE=${1#*=}; shift; fi
+                case $COLOR_MODE in auto|always|never) :;; *) printf 'Invalid color mode: %s\n' "$COLOR_MODE" >&2; return 64;; esac;;
             --root|--kernel)
                 if (( $# < 2 )) || [[ -z $2 ]]; then printf 'Missing value for %s\n' "$1" >&2; return 64; fi
                 if [[ $1 == --root ]]; then
@@ -535,8 +575,9 @@ main() {
             *) printf 'Unknown option: %s\n' "$1" >&2; return 64;;
         esac
     done
+    setup_color
     if (( LIST_KEYS )); then
-        printf 'INFERRED candidates, not an official Epic key allowlist. See docs/signing-keys.md.\n'
+        warning 'INFERRED candidates, not an official Epic key allowlist. See docs/signing-keys.md.'
         cat -- "$SCRIPT_DIR/certs/keys.tsv" || return 2
         return 0
     fi
@@ -567,10 +608,14 @@ main() {
     check_lockdown
     check_kexec
     check_bpf
-    printf '\n%d PASS, %d FAIL, %d UNKNOWN, %d SKIP\n' "$PASSED" "$BLOCKED" "$UNKNOWN" "$SKIPPED"
-    printf 'Signing-key policy and boot attestation require Epic validation. Requirements may change.\n'
-    if (( BLOCKED )); then printf 'RESULT: NOT READY: observed requirement blockers.\n'; return 1; fi
-    printf 'RESULT: INDETERMINATE: local checks cannot certify EAC Linux v2 compatibility.\n'
+    printf '\n'
+    color_text PASS "$PASSED PASS"; printf ', '
+    color_text FAIL "$BLOCKED FAIL"; printf ', '
+    color_text UNKNOWN "$UNKNOWN UNKNOWN"; printf ', '
+    color_text SKIP "$SKIPPED SKIP"; printf '\n'
+    warning 'Signing-key policy and boot attestation require Epic validation. Requirements may change.'
+    if (( BLOCKED )); then color_text FAIL 'RESULT: NOT READY: observed requirement blockers.'; printf '\n'; return 1; fi
+    color_text UNKNOWN 'RESULT: INDETERMINATE: local checks cannot certify EAC Linux v2 compatibility.'; printf '\n'
     return 2
 }
 
