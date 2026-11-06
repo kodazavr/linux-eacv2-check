@@ -110,7 +110,9 @@ read_file() {
 }
 
 config_has() { [[ $'\n'$CONFIG$'\n' == *$'\n'"$1=$2"$'\n'* ]]; }
-config_disabled() { [[ $'\n'$CONFIG$'\n' == *$'\n'"# $1 is not set"$'\n'* ]]; }
+config_disabled() {
+    [[ $'\n'$CONFIG$'\n' == *$'\n'"# $1 is not set"$'\n'* ]] || config_has "$1" n
+}
 
 config_value() {
     local key=$1 line
@@ -526,6 +528,21 @@ check_lockdown() {
     evidence CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY "$(config_value CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY)" 'y, or lockdown=integrity at boot'
 }
 
+kexec_compiled_out() {
+    # KEXEC_CORE is hidden and may be omitted when both interfaces are off.
+    if config_disabled CONFIG_KEXEC && config_disabled CONFIG_KEXEC_FILE; then return 0; fi
+    # Conversely, a disabled core rules out its dependent interfaces, even if
+    # their entries are omitted. Do not accept contradictory enabled values.
+    config_disabled CONFIG_KEXEC_CORE || return 1
+    local key
+    for key in CONFIG_KEXEC CONFIG_KEXEC_FILE; do
+        case $(config_value "$key") in
+            n|'<unavailable>') ;;
+            *) return 1;;
+        esac
+    done
+}
+
 check_kexec() {
     local disabled loaded crash
     disabled=$(read_file /proc/sys/kernel/kexec_load_disabled) || disabled=
@@ -535,8 +552,8 @@ check_kexec() {
         report FAIL Kexec 'A kexec or crash kernel is already loaded; disabling further loads does not remove it.'
     elif [[ $disabled == 0 ]]; then
         report FAIL Kexec 'kernel.kexec_load_disabled=0; kexec loading is not disabled.'
-    elif config_disabled CONFIG_KEXEC_CORE && config_disabled CONFIG_KEXEC && config_disabled CONFIG_KEXEC_FILE; then
-        report PASS Kexec 'Both kexec interfaces and KEXEC_CORE are compiled out in the kernel config.'
+    elif kexec_compiled_out; then
+        report PASS Kexec 'Kexec loading is compiled out: both interfaces or their required core are disabled in the running kernel config.'
     elif [[ $disabled == 1 && $(boot_value sysctl.kernel.kexec_load_disabled) == 1 && $loaded == 0 && $crash == 0 ]]; then
         report PASS Kexec 'Loading disabled, no preloaded images, and sysctl.kernel.kexec_load_disabled=1 present on boot command line.'
     else
@@ -547,8 +564,9 @@ check_kexec() {
     evidence /sys/kernel/kexec_crash_loaded "${crash:-<unavailable>}" '0, or unavailable when interfaces are compiled out'
     evidence 'sysctl.kernel.kexec_load_disabled boot parameter' "$(boot_observed sysctl.kernel.kexec_load_disabled)" '1, or both interfaces compiled out'
     local key
-    for key in CONFIG_KEXEC_CORE CONFIG_KEXEC CONFIG_KEXEC_FILE; do
-        evidence "$key" "$(config_value "$key")" 'n for compiled-out alternative; otherwise boot-time disable required'
+    evidence CONFIG_KEXEC_CORE "$(config_value CONFIG_KEXEC_CORE)" 'n, or optional when both interfaces are explicitly disabled'
+    for key in CONFIG_KEXEC CONFIG_KEXEC_FILE; do
+        evidence "$key" "$(config_value "$key")" 'n, or absent with core disabled; otherwise boot-time disable required'
     done
 }
 

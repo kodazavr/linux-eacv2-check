@@ -376,6 +376,40 @@ class CheckerTests(unittest.TestCase):
         self.status(r, "Lockdown", "PASS")
         self.status(r, "Kexec", "PASS")
 
+    def test_kexec_config_handles_valid_absent_flags(self):
+        self.put("proc/cmdline", "quiet\n")
+        for path in ("proc/sys/kernel/kexec_load_disabled", "sys/kernel/kexec_loaded",
+                     "sys/kernel/kexec_crash_loaded"):
+            (self.root / path).unlink()
+        cases = (
+            ("# CONFIG_KEXEC is not set\n# CONFIG_KEXEC_FILE is not set\n", "PASS"),
+            ("CONFIG_KEXEC=n\nCONFIG_KEXEC_FILE=n\n", "PASS"),
+            ("# CONFIG_KEXEC_CORE is not set\n", "PASS"),
+            ("CONFIG_KEXEC_CORE=n\n", "PASS"),
+            ("CONFIG_BPF_LSM=y\n", "UNKNOWN"),
+            ("# CONFIG_KEXEC is not set\n", "UNKNOWN"),
+            ("CONFIG_KEXEC=y\n# CONFIG_KEXEC_FILE is not set\n", "UNKNOWN"),
+            ("# CONFIG_KEXEC is not set\nCONFIG_KEXEC_FILE=y\n", "UNKNOWN"),
+            ("CONFIG_KEXEC_CORE=n\nCONFIG_KEXEC=y\n", "UNKNOWN"),
+            ("CONFIG_KEXEC_CORE=n\nCONFIG_KEXEC_FILE=y\n", "UNKNOWN"),
+        )
+        for config, expected in cases:
+            with self.subTest(config=config):
+                self.put("proc/config.gz", gzip.compress(config.encode()))
+                self.status(self.run_check(), "Kexec", expected)
+
+    def test_kexec_runtime_blockers_override_compiled_out_interfaces(self):
+        self.put("proc/config.gz", gzip.compress(
+            b"# CONFIG_KEXEC is not set\n# CONFIG_KEXEC_FILE is not set\n"))
+        for path, value in (("sys/kernel/kexec_loaded", "1\n"),
+                            ("sys/kernel/kexec_crash_loaded", "1\n"),
+                            ("proc/sys/kernel/kexec_load_disabled", "0\n")):
+            with self.subTest(path=path):
+                previous = (self.root / path).read_bytes()
+                self.put(path, value)
+                self.status(self.run_check(), "Kexec", "FAIL")
+                self.put(path, previous)
+
     def test_arguments_after_double_dash_do_not_count(self):
         self.put("proc/cmdline", "-- lockdown=integrity sysctl.kernel.kexec_load_disabled=1\n")
         r = self.run_check()

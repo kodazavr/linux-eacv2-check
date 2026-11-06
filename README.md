@@ -73,6 +73,13 @@ It does not imply that any specific handheld is supported, or exempt it from the
 other checks. No minimum kernel version is invented: feature evidence is used.
 The Linux distribution's name alone is not treated as an incompatibility.
 
+For compiled-out kexec, both `CONFIG_KEXEC` and `CONFIG_KEXEC_FILE` explicitly
+disabled in `/proc/config.gz` are sufficient; the hidden `CONFIG_KEXEC_CORE`
+entry may be absent. An explicitly disabled core also permits absent interface
+entries, provided neither interface has a contradictory setting. Both
+`# CONFIG_… is not set` and `CONFIG_…=n` count as disabled. Missing configuration
+alone remains inconclusive, and observed runtime kexec blockers still fail.
+
 ## Reading results
 
 - `PASS`: the specific local prerequisite was observed.
