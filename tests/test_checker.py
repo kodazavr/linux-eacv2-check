@@ -76,6 +76,51 @@ class CheckerTests(unittest.TestCase):
         self.put("proc/sys/kernel/tainted", "8192\n")
         self.status(self.run_check(), "Signed kernel and modules", "FAIL")
 
+    def test_unsigned_or_unverified_loaded_modules_are_named(self):
+        self.put("proc/sys/kernel/tainted", "8192\n")
+        self.put("sys/module/nvidia/taint", "OE\n")
+        self.put("sys/module/unsigned_driver/taint", "E\n")
+        self.put("sys/module/other_driver/taint", "PO\n")
+        self.put("sys/module/clean_driver/taint", "\n")
+        r = self.run_check()
+        self.status(r, "Signed kernel and modules", "FAIL")
+        self.assertIn("  - nvidia (taint=OE)", r.stdout)
+        self.assertIn("  - unsigned_driver (taint=E)", r.stdout)
+        self.assertNotIn("  - other_driver", r.stdout)
+        self.assertNotIn("  - clean_driver", r.stdout)
+
+    def test_module_e_taint_is_a_blocker_without_global_taint_evidence(self):
+        (self.root / "proc/sys/kernel/tainted").unlink()
+        self.put("sys/module/unverified_driver/taint", "OE\n")
+        r = self.run_check()
+        self.status(r, "Signed kernel and modules", "FAIL")
+        self.assertIn("  - unverified_driver (taint=OE)", r.stdout)
+
+    def test_empty_loaded_module_list_does_not_clear_boot_taint(self):
+        self.put("proc/sys/kernel/tainted", "8192\n")
+        (self.root / "sys/module").mkdir(parents=True)
+        r = self.run_check()
+        self.status(r, "Signed kernel and modules", "FAIL")
+        self.assertIn("No loaded modules with E taint found", r.stdout)
+        self.assertIn("persists after unloading", r.stdout)
+
+    def test_unavailable_module_taint_is_reported_without_claiming_a_clean_list(self):
+        r = self.run_check()
+        self.assertIn("Loaded module taint list unavailable", r.stdout)
+        self.assertNotIn("No loaded modules with E taint found", r.stdout)
+
+    def test_snapshot_module_taint_does_not_follow_external_symlinks(self):
+        outside = self.root.parent / (self.root.name + "-module-taint")
+        outside.write_text("E\n")
+        self.addCleanup(outside.unlink)
+        path = self.root / "sys/module/external_driver/taint"
+        path.parent.mkdir(parents=True)
+        path.symlink_to(outside)
+        r = self.run_check()
+        self.status(r, "Signed kernel and modules", "UNKNOWN")
+        self.assertNotIn("  - external_driver", r.stdout)
+        self.assertIn("1 module taint file(s) unreadable", r.stdout)
+
     def test_proprietary_and_out_of_tree_taints_do_not_mean_unsigned(self):
         self.put("proc/sys/kernel/tainted", "4097\n")
         self.status(self.run_check(), "Signed kernel and modules", "UNKNOWN")

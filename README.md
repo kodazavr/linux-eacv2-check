@@ -58,7 +58,7 @@ published October 14, 2026. Epic says the requirements may evolve.
 
 | Requirement | Evidence used | Limit |
 | --- | --- | --- |
-| Signed kernel and modules | Unsigned-module taint; optional kernel signature verification and module signing-key IDs | Running-image identity, full chain, MOK enrollment and Epic trust are not certified |
+| Signed kernel and modules | Unsigned-module taint and names of loaded modules carrying `E`; optional kernel signature verification and module signing-key IDs | Running-image identity, full chain, MOK enrollment and Epic trust are not certified |
 | TPM 2.0 | TPM version from sysfs | No TPM commands or attestation test |
 | Secure Boot | EFI SecureBoot and SetupMode variables | Enabled does not establish acceptable keys |
 | Measured boot | Readable, nonempty firmware TPM event log | Log coverage, PCR replay and remote attestation are not validated |
@@ -91,6 +91,15 @@ certificate sources, roles, rotations, and remaining gaps. Certificate subject
 names are not used as proof. Kernel checks use `sbverify --cert`; module `sig_key`
 matches are explicitly metadata hints and do not verify module signatures.
 Package repository OpenPGP keys are unrelated to these X.509 signing keys.
+
+The signing check lists loaded modules whose `/sys/module/<name>/taint` contains
+`E`, meaning they were unsigned or their signatures could not be verified by the
+kernel when loaded. This list uses runtime evidence and needs no additional
+tools. It also works with `--root` snapshots containing those sysfs files.
+Unavailable module sysfs or unreadable taint files are reported as unavailable evidence. Global
+bit 13 persists after unloading a module, so a failure can remain even when the
+loaded-module list is empty. A module without `E` is not thereby confirmed to
+use an Epic-accepted key.
 
 ## Validation
 

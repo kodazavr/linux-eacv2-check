@@ -101,13 +101,39 @@ boot_value() {
 }
 
 check_signatures() {
-    local taint
+    local taint base path flags name available=0 unreadable=0 module
+    local -a flagged=()
     taint=$(read_file /proc/sys/kernel/tainted) || taint=
+    if base=$(checked_path "${ROOT}/sys/module") && [[ -d $base && -r $base && -x $base ]]; then
+        available=1
+        for path in "$base"/*/taint; do
+            if flags=$(read_file "${path#"$ROOT"}"); then
+                [[ $flags == *E* ]] || continue
+                name=${path%/taint}
+                flagged+=("${name##*/} (taint=$flags)")
+            else
+                unreadable=$((unreadable + 1))
+            fi
+        done
+    fi
     # Bit 13 means an unsigned/unverifiable module has been loaded this boot.
     if [[ $taint =~ ^[0-9]{1,10}$ ]] && (( (10#$taint & 8192) != 0 )); then
         report FAIL 'Signed kernel and modules' 'Kernel taint bit 13 records an unsigned/unverifiable module loaded this boot (even if since unloaded).'
+    elif (( ${#flagged[@]} )); then
+        report FAIL 'Signed kernel and modules' 'Loaded modules carry unsigned/unverifiable E taint.'
     else
         report UNKNOWN 'Signed kernel and modules' 'No attested running-image/module chain. Candidate distribution key matches are evidence only; all enrolled MOKs must also be well-known.'
+    fi
+    if (( ${#flagged[@]} )); then
+        printf '[INFO] Unsigned/unverified loaded modules (kernel E taint):\n'
+        for module in "${flagged[@]}"; do printf '  - %s\n' "$module"; done
+    elif (( available && unreadable == 0 )); then
+        printf '[INFO] No loaded modules with E taint found; global taint persists after unloading and this does not establish Epic key trust.\n'
+    fi
+    if (( ! available )); then
+        printf '[INFO] Loaded module taint list unavailable in this filesystem view.\n'
+    elif (( unreadable )); then
+        printf '[INFO] %d module taint file(s) unreadable; loaded module list may be incomplete.\n' "$unreadable"
     fi
 }
 
