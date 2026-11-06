@@ -153,6 +153,57 @@ class CheckerTests(unittest.TestCase):
         self.put("sys/kernel/iommu_groups/1/type", "identity\n")
         self.status(self.run_check(), "IOMMU", "FAIL")
 
+    def test_identity_groups_and_their_devices_are_identified(self):
+        self.put("sys/kernel/iommu_groups/7/type", "identity\n")
+        self.put("sys/kernel/iommu_groups/7/devices/0000:03:00.0/vendor", "0x10de\n")
+        self.put("sys/kernel/iommu_groups/7/devices/0000:03:00.1/vendor", "0x10de\n")
+        self.put("sys/kernel/iommu_groups/12/type", "identity\n")
+        self.put("sys/kernel/iommu_groups/12/devices/0000:04:00.0/vendor", "0x1234\n")
+        r = self.run_check()
+        self.status(r, "IOMMU", "FAIL")
+        self.assertIn("[INFO] IOMMU group 7: type=identity", r.stdout)
+        self.assertIn("[INFO] IOMMU group 12: type=identity", r.stdout)
+        for address in ("0000:03:00.0", "0000:03:00.1", "0000:04:00.0"):
+            self.assertIn(f"  - {address}", r.stdout)
+        self.assertNotIn("[INFO] IOMMU group 0:", r.stdout)
+
+    def test_identity_group_without_visible_devices_is_still_identified(self):
+        self.put("sys/kernel/iommu_groups/7/type", "identity\n")
+        r = self.run_check()
+        self.assertIn("[INFO] IOMMU group 7: type=identity", r.stdout)
+        self.assertIn("Devices unavailable", r.stdout)
+
+    def test_unreadable_and_unclassified_group_types_are_identified(self):
+        (self.root / "sys/kernel/iommu_groups/0/type").unlink()
+        self.put("sys/kernel/iommu_groups/2/type", "unmanaged\n")
+        r = self.run_check()
+        self.status(r, "IOMMU", "UNKNOWN")
+        self.assertIn("[INFO] IOMMU group 0: type unreadable", r.stdout)
+        self.assertIn("[INFO] IOMMU group 2: type=unmanaged (unclassified)", r.stdout)
+
+    def test_group_devices_do_not_escape_snapshot_root(self):
+        self.put("sys/kernel/iommu_groups/7/type", "identity\n")
+        outside = self.root.parent / (self.root.name + "-devices")
+        (outside / "external-device").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, outside)
+        (self.root / "sys/kernel/iommu_groups/7/devices").symlink_to(outside)
+        r = self.run_check()
+        self.assertIn("[INFO] IOMMU group 7: type=identity", r.stdout)
+        self.assertIn("Devices unavailable", r.stdout)
+        self.assertNotIn("external-device", r.stdout)
+
+    def test_snapshot_group_devices_are_not_looked_up_using_host_lspci(self):
+        self.put("sys/kernel/iommu_groups/7/type", "identity\n")
+        self.put("sys/kernel/iommu_groups/7/devices/0000:03:00.0/vendor", "0x10de\n")
+        self.put("bin/lspci", '#!/usr/bin/env bash\nprintf "HOST_LOOKUP_SHOULD_NOT_RUN"\n')
+        (self.root / "bin/lspci").chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = str(self.root / "bin") + os.pathsep + env["PATH"]
+        r = subprocess.run(["bash", str(SCRIPT), "--root", str(self.root)],
+                           text=True, capture_output=True, env=env, timeout=15)
+        self.assertIn("  - 0000:03:00.0", r.stdout)
+        self.assertNotIn("HOST_LOOKUP_SHOULD_NOT_RUN", r.stdout)
+
     def test_group_without_domain_type_is_not_enough(self):
         (self.root / "sys/kernel/iommu_groups/0/type").unlink()
         self.status(self.run_check(), "IOMMU", "UNKNOWN")

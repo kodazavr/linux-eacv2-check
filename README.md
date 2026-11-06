@@ -32,6 +32,7 @@ checks. Package names below apply to Arch Linux and Manjaro.
 | `realpath` | `coreutils` | Confining filesystem reads when using `--root` |
 | `gzip` | `gzip` | Optional: reading the running kernel's `/proc/config.gz` for build-time lockdown and compiled-out kexec evidence |
 | `modinfo` | `kmod` | Optional: comparing module signing-key IDs with the candidate list; live-system checks only |
+| `lspci` | `pciutils` | Optional: adding PCI device names and numeric IDs to problematic IOMMU groups; live-system checks only |
 | `openssl` **and** `sbverify` | `openssl` **and** `sbsigntools` | Optional: cryptographically checking an on-disk kernel/UKI against the candidate certificates; both commands are needed |
 
 The minimum runtime dependencies are Bash and coreutils. Install all packages
@@ -62,7 +63,7 @@ published October 14, 2026. Epic says the requirements may evolve.
 | TPM 2.0 | TPM version from sysfs | No TPM commands or attestation test |
 | Secure Boot | EFI SecureBoot and SetupMode variables | Enabled does not establish acceptable keys |
 | Measured boot | Readable, nonempty firmware TPM event log | Log coverage, PCR replay and remote attestation are not validated |
-| IOMMU | Group default-domain types and passthrough/disable boot options | Observed translated domains do not certify all device DMA paths |
+| IOMMU | Group default-domain types and passthrough/disable boot options; IDs and devices for problematic groups | Observed translated domains do not certify all device DMA paths |
 | Lockdown | Runtime integrity mode plus explicit boot activation evidence | Runtime activation alone does not establish boot-time activation |
 | Kexec disabled | Runtime disable, preloaded image state, boot command line or compiled-out interfaces | A late sysctl can leave a previously loaded image usable |
 | BPF LSM | `bpf` in the active runtime LSM list | Build configuration alone is insufficient |
@@ -100,6 +101,12 @@ Unavailable module sysfs or unreadable taint files are reported as unavailable e
 bit 13 persists after unloading a module, so a failure can remain even when the
 loaded-module list is empty. A module without `E` is not thereby confirmed to
 use an Epic-accepted key.
+
+The IOMMU check identifies each group with an identity (passthrough) domain,
+an unreadable type, or an unclassified domain type, and lists its device
+addresses. On the live system, optional `lspci` adds PCI device names and numeric
+IDs. Without it, or when inspecting an offline snapshot, device addresses are
+still shown. Missing device information is reported without hiding the group.
 
 ## Validation
 

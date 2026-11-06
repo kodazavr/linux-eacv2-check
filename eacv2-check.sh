@@ -275,8 +275,30 @@ check_measured_boot() {
     report UNKNOWN 'Measured boot' 'No readable, nonempty TPM firmware event log. Check securityfs permissions and bootloader TPM measurements; PCR values alone are insufficient.'
 }
 
+iommu_group_details() {
+    local group=$1 reason=$2 devices device name description count=0
+    printf '[INFO] IOMMU group %s: %s\n' "${group##*/}" "$reason"
+    if ! devices=$(checked_path "$group/devices") || [[ ! -d $devices || ! -r $devices || ! -x $devices ]]; then
+        printf '  - Devices unavailable (missing or unreadable devices directory).\n'
+        return
+    fi
+    for device in "$devices"/*; do
+        name=${device##*/}
+        description=$name
+        # Snapshot addresses must never be looked up against live hardware.
+        if [[ -z $ROOT && $name =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{2}:[[:xdigit:]]{2}\.[0-7]$ ]] && command -v lspci >/dev/null; then
+            description=$(lspci -D -nn -s "$name" 2>/dev/null) || description=
+            [[ -n $description ]] || description=$name
+        fi
+        printf '  - %s\n' "$description"
+        count=$((count + 1))
+    done
+    (( count )) || printf '  - No devices listed.\n'
+}
+
 check_iommu() {
-    local path type groups=0 translated=0 missing=0 identity=0 arg setting='' unknown_type=0 base
+    local path type groups=0 translated=0 missing=0 identity=0 arg setting='' unknown_type=0 base index
+    local -a problem_paths=() problem_reasons=()
     if (( HANDHELD )); then
         report SKIP 'IOMMU' "User declared handheld; applying Epic's non-handheld exception. Device acceptance is not established."
         return
@@ -311,10 +333,20 @@ check_iommu() {
         if type=$(read_file "${path#"$ROOT"}/type"); then
             case $type in
                 DMA|DMA-FQ) translated=$((translated + 1));;
-                identity) identity=$((identity + 1));;
-                *) unknown_type=$((unknown_type + 1));;
+                identity)
+                    identity=$((identity + 1))
+                    problem_paths+=("$path")
+                    problem_reasons+=('type=identity');;
+                *)
+                    unknown_type=$((unknown_type + 1))
+                    problem_paths+=("$path")
+                    problem_reasons+=("type=${type:-empty} (unclassified)");;
             esac
-        else missing=$((missing + 1)); fi
+        else
+            missing=$((missing + 1))
+            problem_paths+=("$path")
+            problem_reasons+=('type unreadable')
+        fi
     done
     if (( identity )); then
         report FAIL 'IOMMU' "$identity of $groups groups have identity (passthrough) default domains."
@@ -327,6 +359,9 @@ check_iommu() {
     else
         report PASS 'IOMMU' "$translated groups have DMA/DMA-FQ translated default domains. Full DMA-device coverage is not attested."
     fi
+    for index in "${!problem_paths[@]}"; do
+        iommu_group_details "${problem_paths[$index]}" "${problem_reasons[$index]}"
+    done
 }
 
 check_lockdown() {
