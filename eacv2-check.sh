@@ -273,7 +273,7 @@ key_hints() {
                 fi
             fi
         else
-            warning 'Kernel signature: optional openssl and sbverify (sbsigntools) are needed for cryptographic candidate-key checks.'
+            warning 'Kernel signature: optional openssl and sbverify (sbsigntools/sbsigntool) are needed for cryptographic candidate-key checks.'
             local tool location
             for tool in openssl sbverify; do
                 location=$(command -v "$tool") || location='<unavailable>'

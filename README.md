@@ -1,8 +1,8 @@
-# EAC Linux v2 preflight for Arch-based Linux
+# EAC Linux v2 preflight
 
-A read-only Bash checker for the **running boot session**, developed and checked
-on Manjaro. It reports local evidence for Epic's requirements, with a candidate
-distribution signing-key reference inferred from the vendors Epic names.
+A read-only Bash checker for the **running Linux boot session**. It reports
+local evidence for Epic's requirements, with a candidate distribution signing-key
+reference inferred from the vendors Epic names.
 
 > **Warning: the certificate list is preliminary.** It is an inferred,
 > potentially incomplete or outdated reference, not an official Epic allowlist.
@@ -23,9 +23,9 @@ arguments, load BPF programs, or access the network.
 ## Required and optional tools
 
 The following commands must be available in `PATH` for their corresponding
-checks. Package names below apply to Arch Linux and Manjaro.
+checks. Package names vary by Linux distribution; common names are listed below.
 
-| Tool / commands | Package | Required for |
+| Tool / commands | Common package name(s) | Required for |
 | --- | --- | --- |
 | `bash` 4 or newer | `bash` | Running the checker |
 | `env`, `dirname`, `cat`, `od` | `coreutils` | Executable startup, locating bundled files, reading system evidence and decoding EFI variables / TPM log bytes |
@@ -33,7 +33,7 @@ checks. Package names below apply to Arch Linux and Manjaro.
 | `gzip` | `gzip` | Optional: reading the running kernel's `/proc/config.gz` for build-time lockdown and compiled-out kexec evidence |
 | `modinfo` | `kmod` | Optional: comparing module signing-key IDs with the candidate list; live-system checks only |
 | `lspci` | `pciutils` | Optional: adding PCI device names and numeric IDs to problematic IOMMU groups; live-system checks only |
-| `openssl` **and** `sbverify` | `openssl` **and** `sbsigntools` | Optional: cryptographically checking an on-disk kernel/UKI against the candidate certificates; both commands are needed |
+| `openssl` **and** `sbverify` | `openssl` **and** `sbsigntools` or `sbsigntool` | Optional: cryptographically checking an on-disk kernel/UKI against the candidate certificates; both commands are needed |
 
 The minimum runtime dependencies are Bash and coreutils. Install all packages
 listed above to enable every implemented check and signing-key hint. Missing
@@ -71,7 +71,7 @@ published October 14, 2026. Epic says the requirements may evolve.
 The `--handheld` option explicitly selects Epic's IOMMU exception for handhelds.
 It does not imply that any specific handheld is supported, or exempt it from the
 other checks. No minimum kernel version is invented: feature evidence is used.
-The name of an Arch derivative alone is not treated as an incompatibility.
+The Linux distribution's name alone is not treated as an incompatibility.
 
 ## Reading results
 
@@ -139,10 +139,10 @@ still shown. Missing device information is reported without hiding the group.
 
 ## Validation
 
-Development validation additionally needs `python3` (package `python`) and
+Development validation additionally needs `python3` (package `python3` or `python`) and
 `shellcheck` (package `shellcheck`). Neither is needed to run the checker.
 The certificate tests need `openssl` and are skipped if it is absent. `sbsign`
-(package `sbsigntools`) is only needed to reproduce the manual signing test
+(package `sbsigntools` or `sbsigntool`) is only needed to reproduce the manual signing test
 described below; the checker itself does not invoke it.
 
 ```bash
@@ -160,7 +160,7 @@ Snapshot symlinks resolving outside the supplied root are refused; kernel build
 evidence comes only from `/proc/config.gz`. Offline module metadata scanning is
 omitted to prevent an external module tool from following host paths.
 
-Real `sbsign`/`sbverify` checks were also run using Arch's `sbsigntools` 0.9.5-4
+Real `sbsign`/`sbverify` checks were also run using `sbsigntools` 0.9.5-4
 extracted into `/tmp`, with no package installation. A temporary signed copy of a
 kernel image verified against its signing certificate and failed against another
 certificate with the same displayed subject name. The local CachyOS kernel image
@@ -189,5 +189,5 @@ not a general conclusion about Manjaro or stock Manjaro kernels.
   explain why a measurement log must be validated against PCRs.
 - [IOMMU group ABI](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-kernel-iommu_groups)
   documents the default-domain `type` interface.
-- [Arch's sbverify manual](https://man.archlinux.org/man/sbverify.1.en)
+- [sbverify manual](https://man.archlinux.org/man/sbverify.1.en)
   distinguishes cryptographic verification from merely listing signatures.
