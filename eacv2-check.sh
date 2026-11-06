@@ -10,6 +10,7 @@ CONFIG='' CMDLINE='' KERNEL='' KERNEL_IMAGE='' LIST_KEYS=0 CMDLINE_READABLE=0
 COLOR_MODE=auto COLOR_ENABLED=0
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 declare -a BOOT_ARGS=()
+declare -a CHECK_TITLES=() CHECK_STATUSES=()
 
 usage() {
     cat <<'EOF'
@@ -67,6 +68,8 @@ warning() {
 
 report() {
     local status=$1 title=$2 detail=$3
+    CHECK_TITLES+=("$title")
+    CHECK_STATUSES+=("$status")
     case $status in
         PASS) PASSED=$((PASSED + 1));;
         FAIL) BLOCKED=$((BLOCKED + 1));;
@@ -75,6 +78,16 @@ report() {
     esac
     color_text "$status" "[$status]"
     printf ' %s: %s\n' "$title" "$detail"
+}
+
+check_summary() {
+    local index
+    printf '\nCheck summary:\n'
+    for index in "${!CHECK_TITLES[@]}"; do
+        printf '  '
+        color_text "${CHECK_STATUSES[$index]}" "[${CHECK_STATUSES[$index]}]"
+        printf ' %s\n' "${CHECK_TITLES[$index]}"
+    done
 }
 
 evidence() {
@@ -608,6 +621,7 @@ main() {
     check_lockdown
     check_kexec
     check_bpf
+    check_summary
     printf '\n'
     color_text PASS "$PASSED PASS"; printf ', '
     color_text FAIL "$BLOCKED FAIL"; printf ', '

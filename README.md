@@ -85,6 +85,10 @@ messages are yellow, and `SKIP` is cyan. Summary counts and the final result use
 the same colors. Warnings provide context and do not add failed checks.
 Status labels remain visible without color.
 
+Every check run ends with a short summary listing all eight check names and their
+results in execution order, followed by totals and the overall result. The
+summary uses the same status colors as the detailed output.
+
 Color defaults to `--color=auto`: redirected/piped output and `TERM=dumb` stay
 plain, and a nonempty `NO_COLOR` environment variable disables automatic color.
 Use `--color=always` to force ANSI colors or `--color=never` to disable them.

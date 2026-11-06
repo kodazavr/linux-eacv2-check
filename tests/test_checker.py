@@ -53,6 +53,43 @@ class CheckerTests(unittest.TestCase):
             self.status(r, check, "UNKNOWN")
         self.assertIn("INDETERMINATE", r.stdout)
 
+    def test_final_summary_lists_all_eight_checks_in_execution_order(self):
+        r = self.run_check()
+        self.assertIn("Check summary:\n", r.stdout)
+        summary = r.stdout.split("Check summary:\n", 1)[1]
+        expected = [
+            "  [UNKNOWN] Signed kernel and modules",
+            "  [PASS] TPM 2.0",
+            "  [PASS] Secure Boot",
+            "  [UNKNOWN] Measured boot",
+            "  [PASS] IOMMU",
+            "  [PASS] Lockdown",
+            "  [PASS] Kexec",
+            "  [PASS] BPF LSM",
+        ]
+        self.assertEqual(summary.splitlines()[:8], expected)
+        self.assertIn("6 PASS, 0 FAIL, 2 UNKNOWN, 0 SKIP", summary)
+        self.assertTrue(summary.rstrip().endswith(
+            "RESULT: INDETERMINATE: local checks cannot certify EAC Linux v2 compatibility."))
+        self.assertEqual(r.returncode, 2)
+
+    def test_final_summary_preserves_failure_and_skip_results(self):
+        self.put("sys/kernel/security/lsm", "capability,lockdown\n")
+        r = self.run_check("--handheld")
+        self.assertIn("Check summary:\n", r.stdout)
+        summary = r.stdout.split("Check summary:\n", 1)[1]
+        self.assertIn("  [SKIP] IOMMU\n", summary)
+        self.assertIn("  [FAIL] BPF LSM\n", summary)
+        self.assertIn("4 PASS, 1 FAIL, 2 UNKNOWN, 1 SKIP", summary)
+        self.assertEqual(r.returncode, 1)
+
+    def test_final_summary_uses_status_colors(self):
+        r = self.run_check("--color=always")
+        self.assertIn("Check summary:\n", r.stdout)
+        summary = r.stdout.split("Check summary:\n", 1)[1]
+        self.assertIn("  \x1b[32m[PASS]\x1b[0m TPM 2.0\n", summary)
+        self.assertIn("  \x1b[33m[UNKNOWN]\x1b[0m Measured boot\n", summary)
+
     def test_forced_color_distinguishes_pass_fail_and_unknown(self):
         self.put("proc/cmdline", "iommu=pt\n")
         r = self.run_check("--color=always")
