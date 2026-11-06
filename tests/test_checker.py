@@ -153,6 +153,82 @@ class CheckerTests(unittest.TestCase):
         self.put("sys/kernel/iommu_groups/1/type", "identity\n")
         self.status(self.run_check(), "IOMMU", "FAIL")
 
+    def test_tpm_evidence_lists_every_device_with_current_and_expected_versions(self):
+        self.put("sys/class/tpm/tpm0/tpm_version_major", "1\n")
+        self.put("sys/class/tpm/tpm1/tpm_version_major", "3\n")
+        r = self.run_check()
+        self.assertIn("tpm0/tpm_version_major: current=1; expected=2", r.stdout)
+        self.assertIn("tpm1/tpm_version_major: current=3; expected=2", r.stdout)
+
+    def test_secure_boot_evidence_includes_both_variables_even_when_disabled(self):
+        self.put(f"sys/firmware/efi/efivars/SecureBoot-{GUID}", b"\x07\0\0\0\x00")
+        self.put(f"sys/firmware/efi/efivars/SetupMode-{GUID}", b"\x07\0\0\0\x01")
+        r = self.run_check()
+        self.assertIn("SecureBoot: current=0; expected=1", r.stdout)
+        self.assertIn("SetupMode: current=1; expected=0", r.stdout)
+
+    def test_invalid_efi_byte_is_shown_without_being_accepted(self):
+        self.put(f"sys/firmware/efi/efivars/SecureBoot-{GUID}", b"\x07\0\0\0\x02")
+        r = self.run_check()
+        self.status(r, "Secure Boot", "UNKNOWN")
+        self.assertIn("SecureBoot: current=2; expected=1", r.stdout)
+
+    def test_kexec_failure_lists_both_loaded_images_and_runtime_disable_state(self):
+        self.put("sys/kernel/kexec_loaded", "1\n")
+        self.put("sys/kernel/kexec_crash_loaded", "1\n")
+        self.put("proc/sys/kernel/kexec_load_disabled", "0\n")
+        r = self.run_check()
+        self.status(r, "Kexec", "FAIL")
+        for label, current, expected in (("kernel.kexec_load_disabled", 0, 1),
+                                         ("/sys/kernel/kexec_loaded", 1, 0),
+                                         ("/sys/kernel/kexec_crash_loaded", 1, 0)):
+            self.assertIn(f"{label}: current={current}; expected={expected}", r.stdout)
+
+    def test_lockdown_failure_shows_active_mode_and_boot_option(self):
+        self.put("sys/kernel/security/lockdown", "[none] integrity confidentiality\n")
+        self.put("proc/cmdline", "quiet lockdown=confidentiality\n")
+        r = self.run_check()
+        self.assertIn("/sys/kernel/security/lockdown: current=[none] integrity confidentiality; expected=integrity active at boot", r.stdout)
+        self.assertIn("lockdown boot parameter: current=confidentiality; expected=integrity", r.stdout)
+
+    def test_missing_bpf_lsm_shows_actual_runtime_list(self):
+        self.put("sys/kernel/security/lsm", "capability,lockdown,yama\n")
+        r = self.run_check()
+        self.assertIn("/sys/kernel/security/lsm: current=capability,lockdown,yama; expected=list containing bpf", r.stdout)
+
+    def test_module_taint_evidence_shows_current_and_expected_flags(self):
+        self.put("sys/module/nvidia/taint", "OE\n")
+        r = self.run_check()
+        self.assertIn("nvidia (taint=OE)", r.stdout)
+        self.assertIn("expected=no E taint", r.stdout)
+
+    def test_iommu_group_evidence_states_expected_domain_types(self):
+        self.put("sys/kernel/iommu_groups/7/type", "identity\n")
+        r = self.run_check()
+        self.assertIn("IOMMU group 7: type=identity", r.stdout)
+        self.assertIn("expected=DMA or DMA-FQ", r.stdout)
+
+    def test_iommu_failure_lists_all_relevant_boot_arguments(self):
+        self.put("proc/cmdline", "iommu=pt iommu.passthrough=1\n")
+        r = self.run_check()
+        self.assertIn("IOMMU boot argument: current=iommu=pt; expected=hardware translation", r.stdout)
+        self.assertIn("IOMMU boot argument: current=iommu.passthrough=1; expected=hardware translation", r.stdout)
+
+    def test_iommu_boot_and_group_blockers_do_not_count_as_two_checks(self):
+        self.put("proc/cmdline", "iommu=pt\n")
+        self.put("sys/kernel/iommu_groups/7/type", "identity\n")
+        r = self.run_check()
+        self.assertEqual(r.stdout.count("[FAIL] IOMMU:"), 1)
+        self.assertIn("IOMMU group 7: type=identity", r.stdout)
+        self.assertIn("1 FAIL", r.stdout)
+
+    def test_all_measured_boot_logs_report_their_observed_state(self):
+        self.put("sys/kernel/security/tpm0/binary_bios_measurements", b"")
+        self.put("sys/kernel/security/tpm1/binary_bios_measurements", b"event data")
+        r = self.run_check()
+        self.assertIn("tpm0/binary_bios_measurements: current=empty; expected=readable nonempty event log", r.stdout)
+        self.assertIn("tpm1/binary_bios_measurements: current=readable and nonempty; expected=readable nonempty event log", r.stdout)
+
     def test_identity_groups_and_their_devices_are_identified(self):
         self.put("sys/kernel/iommu_groups/7/type", "identity\n")
         self.put("sys/kernel/iommu_groups/7/devices/0000:03:00.0/vendor", "0x10de\n")
@@ -371,6 +447,29 @@ exit {exit_code}
         self.registry.write_text(self.registry.read_text().replace(self.fingerprint, "0" * 64))
         r = self.run_check("--kernel", str(self.image))
         self.assertNotIn("signature verifies against", r.stdout)
+        self.assertIn(f"current={self.fingerprint}; expected=" + "0" * 64, r.stdout)
+
+    def test_failed_kernel_verification_lists_attempted_certificate(self):
+        self.verifier(1)
+        r = self.run_check("--kernel", str(self.image))
+        self.assertIn("Test vendor / test.pem", r.stdout)
+        self.assertIn("current=verification exit 1; expected=exit 0 for at least one candidate", r.stdout)
+
+    def test_unmatched_module_key_evidence_lists_affected_loaded_modules(self):
+        modules_file = Path("/proc/modules")
+        if not modules_file.exists() or not modules_file.read_text().strip():
+            self.skipTest("requires loaded modules for live modinfo boundary test")
+        first_module = modules_file.read_text().split()[0]
+        modinfo = self.root / "bin/modinfo"
+        modinfo.write_text('''#!/usr/bin/env bash
+[[ $# == 5 && $1 == -k && $3 == -F && $4 == sig_key ]] || exit 99
+printf 'AA:BB:CC:DD\\n'
+''')
+        modinfo.chmod(0o755)
+        r = subprocess.run(["bash", str(self.root / SCRIPT.name)], text=True,
+                           capture_output=True, env=self.env, timeout=15)
+        self.assertIn("Module signing-key ID: current=aabbccdd; expected=SKI in preliminary certs/keys.tsv", r.stdout)
+        self.assertIn(first_module, r.stdout.split("Affected modules:")[1])
 
     def test_list_keys_is_explicitly_inferred(self):
         r = self.run_check("--list-keys")

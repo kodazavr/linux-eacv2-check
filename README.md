@@ -80,6 +80,21 @@ The name of an Arch derivative alone is not treated as an incompatibility.
 - `UNKNOWN`: evidence is unavailable or requires stronger validation.
 - `SKIP`: the user selected the handheld IOMMU exception.
 
+Checks include evidence lines in the form `current=...; expected=...`, so a
+mismatch identifies the observed value and the condition being checked. Where
+several items contribute evidence, they are listed individually: both Secure
+Boot variables, every visible TPM and firmware event log, all kexec runtime
+states, and each problematic module or IOMMU group. Missing, unreadable and
+empty evidence are identified explicitly rather than treated as a disabled
+feature. Expectations can describe alternatives, such as disabling kexec at
+boot or compiling both interfaces out of the running kernel.
+
+Signing diagnostics also show failed candidate-certificate verification attempts
+and group unmatched module signing-key IDs with all affected module names.
+These are inconclusive comparisons against the preliminary certificate list,
+not additional failures or proof that Epic rejects those keys. When available,
+kernel signature metadata is shown as unverified information.
+
 Exit codes are `1` for observed blockers, `2` for an indeterminate result, `0`
 for help/key listing, and `64` for invalid arguments. There is deliberately no
 "certified compatible" exit status. A clean local configuration still needs
@@ -97,8 +112,8 @@ The signing check lists loaded modules whose `/sys/module/<name>/taint` contains
 `E`, meaning they were unsigned or their signatures could not be verified by the
 kernel when loaded. This list uses runtime evidence and needs no additional
 tools. It also works with `--root` snapshots containing those sysfs files.
-Unavailable module sysfs or unreadable taint files are reported as unavailable evidence. Global
-bit 13 persists after unloading a module, so a failure can remain even when the
+Unavailable module sysfs or unreadable taint files are reported as unavailable
+evidence. Global bit 13 persists after unloading a module, so a failure can remain even when the
 loaded-module list is empty. A module without `E` is not thereby confirmed to
 use an Epic-accepted key.
 

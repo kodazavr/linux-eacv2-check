@@ -6,7 +6,7 @@ export LC_ALL=C
 shopt -s nullglob
 
 ROOT='' BLOCKED=0 UNKNOWN=0 PASSED=0 SKIPPED=0 HANDHELD=0
-CONFIG='' CMDLINE='' KERNEL='' KERNEL_IMAGE='' LIST_KEYS=0
+CONFIG='' CMDLINE='' KERNEL='' KERNEL_IMAGE='' LIST_KEYS=0 CMDLINE_READABLE=0
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 declare -a BOOT_ARGS=()
 
@@ -43,6 +43,10 @@ report() {
     printf '[%s] %s: %s\n' "$status" "$title" "$detail"
 }
 
+evidence() {
+    printf '  - %s: current=%s; expected=%s\n' "$1" "${2:-<empty>}" "$3"
+}
+
 checked_path() {
     local path=$1 resolved
     if [[ -n $ROOT ]]; then
@@ -60,6 +64,15 @@ read_file() {
 
 config_has() { [[ $'\n'$CONFIG$'\n' == *$'\n'"$1=$2"$'\n'* ]]; }
 config_disabled() { [[ $'\n'$CONFIG$'\n' == *$'\n'"# $1 is not set"$'\n'* ]]; }
+
+config_value() {
+    local key=$1 line
+    if config_disabled "$key"; then printf 'n'; return; fi
+    while IFS= read -r line; do
+        if [[ $line == "$key="* ]]; then printf '%s' "${line#*=}"; return; fi
+    done <<< "$CONFIG"
+    printf '<unavailable>'
+}
 
 load_config() {
     local path data
@@ -100,9 +113,16 @@ boot_value() {
     printf '%s' "$value"
 }
 
+boot_observed() {
+    local value
+    if (( ! CMDLINE_READABLE )); then printf '<command line unavailable>'; return; fi
+    value=$(boot_value "$1")
+    printf '%s' "${value:-<absent or empty>}"
+}
+
 check_signatures() {
     local taint base path flags name available=0 unreadable=0 module
-    local -a flagged=()
+    local -a flagged=() unreadable_paths=()
     taint=$(read_file /proc/sys/kernel/tainted) || taint=
     if base=$(checked_path "${ROOT}/sys/module") && [[ -d $base && -r $base && -x $base ]]; then
         available=1
@@ -113,6 +133,7 @@ check_signatures() {
                 flagged+=("${name##*/} (taint=$flags)")
             else
                 unreadable=$((unreadable + 1))
+                unreadable_paths+=("${path#"$ROOT"}")
             fi
         done
     fi
@@ -124,16 +145,23 @@ check_signatures() {
     else
         report UNKNOWN 'Signed kernel and modules' 'No attested running-image/module chain. Candidate distribution key matches are evidence only; all enrolled MOKs must also be well-known.'
     fi
+    local taint_detail=${taint:-<unavailable>}
+    if [[ $taint =~ ^[0-9]{1,10}$ ]]; then
+        taint_detail="$taint (bit 13=$(( (10#$taint >> 13) & 1 )))"
+    fi
+    evidence /proc/sys/kernel/tainted "$taint_detail" 'bit 13=0 (no unsigned/unverified module history)'
     if (( ${#flagged[@]} )); then
         printf '[INFO] Unsigned/unverified loaded modules (kernel E taint):\n'
-        for module in "${flagged[@]}"; do printf '  - %s\n' "$module"; done
+        for module in "${flagged[@]}"; do printf '  - %s; expected=no E taint\n' "$module"; done
     elif (( available && unreadable == 0 )); then
         printf '[INFO] No loaded modules with E taint found; global taint persists after unloading and this does not establish Epic key trust.\n'
     fi
     if (( ! available )); then
         printf '[INFO] Loaded module taint list unavailable in this filesystem view.\n'
+        evidence /sys/module '<unavailable>' 'readable per-module taint files'
     elif (( unreadable )); then
         printf '[INFO] %d module taint file(s) unreadable; loaded module list may be incomplete.\n' "$unreadable"
+        for path in "${unreadable_paths[@]}"; do evidence "$path" '<unreadable>' 'readable taint flags without E'; done
     fi
 }
 
@@ -143,10 +171,12 @@ normalize_hex() {
 }
 
 key_hints() {
-    local file vendor fingerprint ski role _source _date extra actual value cert matched=0
+    local file vendor fingerprint ski role _source _date extra actual value cert matched=0 result index
+    local -a attempted=() results=()
     local registry="$SCRIPT_DIR/certs/keys.tsv" image=$KERNEL_IMAGE
     if [[ ! -r $registry ]]; then
         printf '[INFO] Signing keys: bundled candidate key registry is unavailable.\n'
+        evidence "$registry" '<unreadable or missing>' 'readable preliminary certificate registry'
         return
     fi
     if [[ -z $image ]]; then
@@ -165,19 +195,43 @@ key_hints() {
             while IFS=$'\t' read -r file vendor fingerprint ski role _source _date extra; do
                 [[ -n $file && $file != \#* && $file != */* && -z $extra ]] || continue
                 cert="$SCRIPT_DIR/certs/$file"
-                actual=$(openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null) || continue
+                if ! actual=$(openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null); then
+                    evidence "$file certificate" '<unreadable or invalid>' "parseable X.509 certificate with SHA256 $fingerprint"
+                    continue
+                fi
                 actual=$(normalize_hex "${actual#*=}")
-                [[ $actual == "$fingerprint" ]] || continue
+                if [[ $actual != "$fingerprint" ]]; then
+                    evidence "$file certificate SHA256" "$actual" "$fingerprint"
+                    continue
+                fi
                 if sbverify --cert "$cert" "$image" >/dev/null 2>&1; then
                     printf '[INFO] Kernel signature verifies against inferred %s key (%s; SHA256 %s).\n' "$vendor" "$role" "$fingerprint"
                     matched=$((matched + 1))
+                else
+                    result=$?
+                    attempted+=("$vendor / $file (SHA256 $fingerprint)")
+                    results+=("verification exit $result")
                 fi
             done < "$registry"
             if (( matched == 0 )); then
                 printf '[INFO] Kernel signature: no verification against bundled keys; list may be incomplete, image unsigned/unsupported, or verifier may have failed.\n'
+                for index in "${!attempted[@]}"; do
+                    evidence "${attempted[$index]}" "${results[$index]}" 'exit 0 for at least one candidate; reference is preliminary'
+                done
+                if value=$(sbverify --list "$image" 2>&1); then
+                    printf '[INFO] Kernel signature metadata (unverified):\n'
+                    while IFS= read -r result; do printf '    %s\n' "$result"; done <<< "$value"
+                else
+                    evidence 'Kernel signature metadata' "${value:-<unavailable>}" 'readable PE signature metadata; listing alone does not verify trust'
+                fi
             fi
         else
             printf '[INFO] Kernel signature: optional openssl and sbverify (sbsigntools) are needed for cryptographic candidate-key checks.\n'
+            local tool location
+            for tool in openssl sbverify; do
+                location=$(command -v "$tool") || location='<unavailable>'
+                evidence "$tool" "$location" 'available executable for kernel signature verification'
+            done
         fi
     else
         printf '[INFO] Kernel signature: no unambiguous on-disk candidate found; use --kernel IMAGE.\n'
@@ -186,12 +240,14 @@ key_hints() {
     # that a loaded module was signed or is identical to its current disk file.
     if [[ -z $ROOT ]] && command -v modinfo >/dev/null; then
         local module rest id total=0 known=0 missing=0 names='' module_match
+        local -A unmatched_modules=()
+        local -a unmatched_ids=()
         while read -r module rest; do
             [[ $module =~ ^[a-zA-Z0-9_]+$ ]] || continue
             total=$((total + 1))
             value=$(modinfo -k "$KERNEL" -F sig_key "$module" 2>/dev/null) || value=
             id=$(normalize_hex "$value")
-            [[ -n $id ]] || { missing=$((missing + 1)); continue; }
+            if [[ -z $id ]]; then missing=$((missing + 1)); id='<unavailable>'; fi
             module_match=0
             while IFS=$'\t' read -r file vendor fingerprint ski role _source _date extra; do
                 [[ -n $ski && $file != \#* && $ski != - ]] || continue
@@ -201,38 +257,56 @@ key_hints() {
                 fi
             done < "$registry"
             known=$((known + module_match))
+            if (( ! module_match )); then
+                if [[ -z ${unmatched_modules[$id]+present} ]]; then
+                    unmatched_ids+=("$id")
+                    unmatched_modules[$id]=$module
+                else unmatched_modules[$id]+=", $module"; fi
+            fi
         done < <(read_file /proc/modules)
         if (( total )); then
             printf '[INFO] Module key hints (disk metadata): %d/%d match candidate SKIs; %d missing/unavailable. Vendors: %s.\n' "$known" "$total" "$missing" "${names:-none}"
             printf '[INFO] SKI matches are hints only; module signatures, loaded bytes, and all enrolled MOKs remain unverified.\n'
+            for id in "${unmatched_ids[@]}"; do
+                evidence 'Module signing-key ID' "$id" 'SKI in preliminary certs/keys.tsv (a match is a hint, not proof of Epic trust)'
+                printf '    Affected modules: %s\n' "${unmatched_modules[$id]}"
+            done
         fi
     fi
 }
 
 check_tpm() {
-    local path version found=0 unreadable=0 base
+    local path version found=0 unreadable=0 base tpm2=0 index
+    local -a paths=() versions=()
     if ! base=$(checked_path "${ROOT}/sys/class/tpm"); then
         report UNKNOWN 'TPM 2.0' 'TPM sysfs unavailable in this filesystem view.'
+        evidence /sys/class/tpm '<unavailable>' 'at least one enabled TPM with tpm_version_major=2'
         return
     fi
     for path in "$base"/tpm[0-9]*; do
         [[ -d $path ]] || continue
         found=1
+        paths+=("${path#"$ROOT"}/tpm_version_major")
         if version=$(read_file "${path#"$ROOT"}/tpm_version_major"); then
+            versions+=("$version")
             if [[ $version == 2 ]]; then
-                report PASS 'TPM 2.0' "TPM 2.0 exposed at ${path#"$ROOT"}; attestation usability is not tested."
-                return
+                tpm2=$((tpm2 + 1))
+            elif [[ $version != 1 ]]; then
+                unreadable=1
             fi
-            [[ $version == 1 ]] || unreadable=1
-        else unreadable=1; fi
+        else unreadable=1; versions+=('<unreadable>'); fi
     done
-    if (( unreadable )); then
+    if (( tpm2 )); then
+        report PASS 'TPM 2.0' "$tpm2 enabled TPM 2.0 device(s) exposed; attestation usability is not tested."
+    elif (( unreadable )); then
         report UNKNOWN 'TPM 2.0' 'TPM version unavailable; a device node alone does not prove TPM 2.0.'
     elif [[ -d ${ROOT}/sys/class/tpm && -r ${ROOT}/sys/class/tpm ]] || (( found )); then
         report FAIL 'TPM 2.0' 'No enabled TPM 2.0 exposed by the kernel. Check firmware TPM/fTPM/PTT and kernel driver support.'
     else
         report UNKNOWN 'TPM 2.0' 'TPM sysfs unavailable; cannot distinguish disabled hardware from restricted visibility.'
     fi
+    for index in "${!paths[@]}"; do evidence "${paths[$index]}" "${versions[$index]}" '2'; done
+    (( found )) || evidence /sys/class/tpm 'no visible TPM devices' 'at least one enabled TPM with tpm_version_major=2'
 }
 
 efi_byte() {
@@ -241,43 +315,54 @@ efi_byte() {
     path=$(checked_path "$path") || return 1
     value=$(od -An -tu1 -j4 -N1 -- "$path" 2>/dev/null) || return 1
     value=${value//[[:space:]]/}
-    [[ $value == 0 || $value == 1 ]] || return 1
+    [[ $value =~ ^[0-9]+$ ]] || return 1
     printf '%s' "$value"
 }
 
 check_secure_boot() {
     local secure setup
+    secure=$(efi_byte SecureBoot) || secure='<unavailable>'
+    setup=$(efi_byte SetupMode) || setup='<unavailable>'
     if [[ ! -d ${ROOT}/sys/firmware/efi ]]; then
         report UNKNOWN 'Secure Boot' 'UEFI sysfs absent (legacy boot or restricted/container view); Secure Boot cannot be established.'
-    elif secure=$(efi_byte SecureBoot); then
-        if [[ $secure == 0 ]]; then
-            report FAIL 'Secure Boot' 'Firmware SecureBoot=0. Enable only with a correctly signed boot chain.'
-        elif setup=$(efi_byte SetupMode); then
-            if [[ $setup == 0 ]]; then
-                report PASS 'Secure Boot' 'SecureBoot=1 and SetupMode=0. Trust in the keys used by the boot chain is assessed separately.'
-            else report FAIL 'Secure Boot' 'Firmware is in SetupMode; Secure Boot is not enforcing a provisioned trust chain.'; fi
-        else report UNKNOWN 'Secure Boot' 'SecureBoot=1, but SetupMode could not be read.'; fi
+    elif [[ $secure == 0 ]]; then
+        report FAIL 'Secure Boot' 'Firmware SecureBoot=0. Enable only with a correctly signed boot chain.'
+    elif [[ $setup == 1 ]]; then
+        report FAIL 'Secure Boot' 'Firmware is in SetupMode; Secure Boot is not enforcing a provisioned trust chain.'
+    elif [[ $secure == 1 && $setup == 0 ]]; then
+        report PASS 'Secure Boot' 'SecureBoot=1 and SetupMode=0. Trust in the keys used by the boot chain is assessed separately.'
     else
         report UNKNOWN 'Secure Boot' 'UEFI SecureBoot variable unreadable/malformed; efivarfs or permissions may restrict access.'
     fi
+    evidence SecureBoot "$secure" '1'
+    evidence SetupMode "$setup" '0'
 }
 
 check_measured_boot() {
-    local path byte base
+    local path byte base readable=0 index
+    local -a paths=() states=()
     base=$(checked_path "${ROOT}/sys/kernel/security") || base=/nonexistent-eac-snapshot
     for path in "$base"/tpm[0-9]*/binary_bios_measurements; do
+        paths+=("${path#"$ROOT"}")
         # securityfs file sizes can be zero even for a nonempty event log.
-        if path=$(checked_path "$path") && byte=$(od -An -tx1 -N1 -- "$path" 2>/dev/null) && [[ -n $byte ]]; then
-            report UNKNOWN 'Measured boot' 'TPM event log is readable and nonempty. Boot-component coverage and log/PCR consistency require validation and attestation.'
-            return
+        if path=$(checked_path "$path") && byte=$(od -An -tx1 -N1 -- "$path" 2>/dev/null); then
+            if [[ -n $byte ]]; then states+=('readable and nonempty'); readable=$((readable + 1)); else states+=('empty'); fi
+        else
+            states+=('<unreadable>')
         fi
     done
-    report UNKNOWN 'Measured boot' 'No readable, nonempty TPM firmware event log. Check securityfs permissions and bootloader TPM measurements; PCR values alone are insufficient.'
+    if (( readable )); then
+        report UNKNOWN 'Measured boot' 'TPM event log is readable and nonempty. Boot-component coverage and log/PCR consistency require validation and attestation.'
+    else
+        report UNKNOWN 'Measured boot' 'No readable, nonempty TPM firmware event log. Check securityfs permissions and bootloader TPM measurements; PCR values alone are insufficient.'
+    fi
+    for index in "${!paths[@]}"; do evidence "${paths[$index]}" "${states[$index]}" 'readable nonempty event log'; done
+    (( ${#paths[@]} )) || evidence '/sys/kernel/security/tpm*/binary_bios_measurements' 'no visible event log files' 'readable nonempty event log'
 }
 
 iommu_group_details() {
     local group=$1 reason=$2 devices device name description count=0
-    printf '[INFO] IOMMU group %s: %s\n' "${group##*/}" "$reason"
+    printf '[INFO] IOMMU group %s: %s; expected=DMA or DMA-FQ\n' "${group##*/}" "$reason"
     if ! devices=$(checked_path "$group/devices") || [[ ! -d $devices || ! -r $devices || ! -x $devices ]]; then
         printf '  - Devices unavailable (missing or unreadable devices directory).\n'
         return
@@ -298,7 +383,7 @@ iommu_group_details() {
 
 check_iommu() {
     local path type groups=0 translated=0 missing=0 identity=0 arg setting='' unknown_type=0 base index
-    local -a problem_paths=() problem_reasons=()
+    local -a problem_paths=() problem_reasons=() boot_evidence=()
     if (( HANDHELD )); then
         report SKIP 'IOMMU' "User declared handheld; applying Epic's non-handheld exception. Device acceptance is not established."
         return
@@ -306,9 +391,10 @@ check_iommu() {
     # Check ordered aliases as well as runtime default-domain types.
     for arg in "${BOOT_ARGS[@]}"; do
         case $arg in
-            iommu.passthrough=1) setting=passthrough;;
-            iommu.passthrough=0) setting=translated;;
+            iommu.passthrough=1) setting=passthrough; boot_evidence+=("$arg");;
+            iommu.passthrough=0) setting=translated; boot_evidence+=("$arg");;
             iommu=*)
+                boot_evidence+=("$arg")
                 local option
                 local -a options
                 IFS=, read -r -a options <<< "${arg#*=}"
@@ -317,14 +403,18 @@ check_iommu() {
                 done;;
             # Vendor switches can be irrelevant to this CPU; runtime groups
             # establish whether disabling the actual hardware took effect.
+            intel_iommu=*|amd_iommu=*) boot_evidence+=("$arg");;
         esac
     done
     if [[ $setting == passthrough || $setting == disabled ]]; then
         report FAIL 'IOMMU' "Boot command line requests $setting; non-handheld systems require hardware IOMMU translation."
-        return
     fi
     if ! base=$(checked_path "${ROOT}/sys/kernel/iommu_groups"); then
-        report UNKNOWN 'IOMMU' 'IOMMU groups are unavailable in this filesystem view.'
+        if [[ $setting != passthrough && $setting != disabled ]]; then
+            report UNKNOWN 'IOMMU' 'IOMMU groups are unavailable in this filesystem view.'
+        fi
+        evidence /sys/kernel/iommu_groups '<unavailable>' 'hardware IOMMU groups with translated DMA domains'
+        for arg in "${boot_evidence[@]}"; do evidence 'IOMMU boot argument' "$arg" 'hardware translation, passthrough disabled'; done
         return
     fi
     for path in "$base"/[0-9]*; do
@@ -348,7 +438,9 @@ check_iommu() {
             problem_reasons+=('type unreadable')
         fi
     done
-    if (( identity )); then
+    if [[ $setting == passthrough || $setting == disabled ]]; then
+        : # The command-line blocker has already been reported.
+    elif (( identity )); then
         report FAIL 'IOMMU' "$identity of $groups groups have identity (passthrough) default domains."
     elif (( groups == 0 )); then
         if [[ -d ${ROOT}/sys/kernel/iommu_groups && -r ${ROOT}/sys/kernel/iommu_groups ]]; then
@@ -359,6 +451,8 @@ check_iommu() {
     else
         report PASS 'IOMMU' "$translated groups have DMA/DMA-FQ translated default domains. Full DMA-device coverage is not attested."
     fi
+    evidence /sys/kernel/iommu_groups "$groups groups; $translated translated; $identity identity; $missing unreadable; $unknown_type unclassified" 'at least one group, all observed default domains DMA or DMA-FQ'
+    for arg in "${boot_evidence[@]}"; do evidence 'IOMMU boot argument' "$arg" 'hardware translation, passthrough disabled'; done
     for index in "${!problem_paths[@]}"; do
         iommu_group_details "${problem_paths[$index]}" "${problem_reasons[$index]}"
     done
@@ -377,8 +471,12 @@ check_lockdown() {
             *) report UNKNOWN Lockdown 'Unrecognized lockdown state.';;
         esac
     else
+        mode='<unavailable>'
         report UNKNOWN Lockdown 'Cannot read /sys/kernel/security/lockdown; securityfs may be unmounted or restricted.'
     fi
+    evidence /sys/kernel/security/lockdown "$mode" 'integrity active at boot'
+    evidence 'lockdown boot parameter' "$(boot_observed lockdown)" 'integrity, or CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y'
+    evidence CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY "$(config_value CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY)" 'y, or lockdown=integrity at boot'
 }
 
 check_kexec() {
@@ -397,6 +495,14 @@ check_kexec() {
     else
         report UNKNOWN Kexec 'Boot-time disable not established. Need runtime value 1, no loaded images and boot-time disable evidence; a late sysctl is insufficient.'
     fi
+    evidence kernel.kexec_load_disabled "${disabled:-<unavailable>}" '1, or both interfaces compiled out'
+    evidence /sys/kernel/kexec_loaded "${loaded:-<unavailable>}" '0, or unavailable when interfaces are compiled out'
+    evidence /sys/kernel/kexec_crash_loaded "${crash:-<unavailable>}" '0, or unavailable when interfaces are compiled out'
+    evidence 'sysctl.kernel.kexec_load_disabled boot parameter' "$(boot_observed sysctl.kernel.kexec_load_disabled)" '1, or both interfaces compiled out'
+    local key
+    for key in CONFIG_KEXEC_CORE CONFIG_KEXEC CONFIG_KEXEC_FILE; do
+        evidence "$key" "$(config_value "$key")" 'n for compiled-out alternative; otherwise boot-time disable required'
+    done
 }
 
 check_bpf() {
@@ -406,8 +512,10 @@ check_bpf() {
             report PASS 'BPF LSM' 'bpf appears in the active runtime LSM list.'
         else report FAIL 'BPF LSM' 'bpf is absent from the active LSM list; CONFIG_BPF_LSM alone does not activate it.'; fi
     else
+        lsm='<unavailable>'
         report UNKNOWN 'BPF LSM' 'Cannot read /sys/kernel/security/lsm; runtime activation is not established.'
     fi
+    evidence /sys/kernel/security/lsm "$lsm" 'list containing bpf'
 }
 
 main() {
@@ -444,7 +552,7 @@ main() {
     KERNEL=$(read_file /proc/sys/kernel/osrelease) || KERNEL=unknown
     # Keep disk config fallback paths within the expected kernel-release format.
     [[ $KERNEL =~ ^[a-zA-Z0-9._+-]+$ ]] || KERNEL=unknown
-    CMDLINE=$(read_file /proc/cmdline) || CMDLINE=
+    if CMDLINE=$(read_file /proc/cmdline); then CMDLINE_READABLE=1; else CMDLINE=''; fi
     parse_cmdline
     load_config
     printf 'EAC Linux v2 preflight (requirements researched 2026-11-06)\nOS: %s | Kernel: %s\n' "$os" "$KERNEL"
